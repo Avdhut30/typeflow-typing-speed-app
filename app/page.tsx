@@ -9,9 +9,10 @@ import {
   History,
   Keyboard,
   Lightbulb,
-  RefreshCw,
+  LoaderCircle,
   RotateCcw,
   Shuffle,
+  Sparkles,
   Target,
   Trophy,
 } from "lucide-react";
@@ -41,11 +42,19 @@ const PASSAGES = [
 ];
 
 const DURATIONS = [15, 30, 60] as const;
+const TOPICS = ["General", "Technology", "Science", "Business", "Creativity"] as const;
 const HISTORY_KEY = "typeflow-session-history";
 const BEST_WPM_KEY = "typeflow-best-wpm";
 
 type TestStatus = "idle" | "running" | "finished";
 type FinishReason = "complete" | "time";
+type PassageSource = "ai" | "generated" | "curated";
+type Topic = (typeof TOPICS)[number];
+
+type TypingPassage = {
+  category: string;
+  text: string;
+};
 
 type SessionResult = {
   id: number;
@@ -108,7 +117,12 @@ function readStoredHistory(): SessionResult[] {
 
 export default function Home() {
   const [duration, setDuration] = useState<number>(30);
-  const [passageIndex, setPassageIndex] = useState(0);
+  const [passage, setPassage] = useState<TypingPassage>(PASSAGES[0]);
+  const [passageNumber, setPassageNumber] = useState(0);
+  const [passageSource, setPassageSource] =
+    useState<PassageSource>("curated");
+  const [topic, setTopic] = useState<Topic>("General");
+  const [isGenerating, setIsGenerating] = useState(false);
   const [typed, setTyped] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [status, setStatus] = useState<TestStatus>("idle");
@@ -122,7 +136,8 @@ export default function Home() {
 
   const startTimeRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const passage = PASSAGES[passageIndex];
+  const recentPassagesRef = useRef<string[]>([PASSAGES[0].text]);
+  const initialPassageRequestedRef = useRef(false);
   const passageTokens = useMemo(
     () => getPassageTokens(passage.text),
     [passage.text],
@@ -264,9 +279,84 @@ export default function Home() {
     window.requestAnimationFrame(() => inputRef.current?.focus());
   };
 
-  const loadNewText = () => {
-    setPassageIndex((current) => (current + 1) % PASSAGES.length);
-    resetTest();
+  const loadNewText = useCallback(
+    async ({
+      focus = true,
+      requestedTopic = topic,
+    }: {
+      focus?: boolean;
+      requestedTopic?: Topic;
+    } = {}) => {
+      setIsGenerating(true);
+      resetTest(false);
+
+      try {
+        const response = await fetch("/api/passage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: requestedTopic,
+            previousTexts: recentPassagesRef.current,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error("Passage request failed");
+        }
+
+        const data = (await response.json()) as {
+          passage?: TypingPassage;
+          source?: PassageSource;
+        };
+
+        if (
+          !data.passage?.text ||
+          typeof data.passage.category !== "string" ||
+          recentPassagesRef.current.includes(data.passage.text)
+        ) {
+          throw new Error("Invalid or repeated passage");
+        }
+
+        setPassage(data.passage);
+        setPassageSource(data.source === "ai" ? "ai" : "generated");
+        setPassageNumber((current) => current + 1);
+        recentPassagesRef.current = [
+          data.passage.text,
+          ...recentPassagesRef.current,
+        ].slice(0, 4);
+      } catch {
+        const fallback =
+          PASSAGES.find(
+            (candidate) =>
+              !recentPassagesRef.current.includes(candidate.text),
+          ) ?? PASSAGES[Date.now() % PASSAGES.length];
+
+        setPassage(fallback);
+        setPassageSource("curated");
+        setPassageNumber((current) => current + 1);
+        recentPassagesRef.current = [
+          fallback.text,
+          ...recentPassagesRef.current,
+        ].slice(0, 4);
+      } finally {
+        setIsGenerating(false);
+        if (focus) {
+          window.requestAnimationFrame(() => inputRef.current?.focus());
+        }
+      }
+    },
+    [resetTest, topic],
+  );
+
+  useEffect(() => {
+    if (initialPassageRequestedRef.current) return;
+    initialPassageRequestedRef.current = true;
+    void loadNewText({ focus: false });
+  }, [loadNewText]);
+
+  const chooseTopic = (nextTopic: Topic) => {
+    setTopic(nextTopic);
+    void loadNewText({ requestedTopic: nextTopic });
   };
 
   const clearHistory = () => {
@@ -274,8 +364,13 @@ export default function Home() {
     window.localStorage.removeItem(HISTORY_KEY);
   };
 
-  const statusLabel =
-    status === "idle" ? "Ready" : status === "running" ? "Live" : "Complete";
+  const statusLabel = isGenerating
+    ? "Creating"
+    : status === "idle"
+      ? "Ready"
+      : status === "running"
+        ? "Live"
+        : "Complete";
   const latestSession = recentSessions[0];
 
   return (
@@ -317,44 +412,76 @@ export default function Home() {
 
         <section className="test-panel" aria-label="Typing test">
           <div className="test-controls">
-            <div className="duration-control">
-              <span className="control-label">Duration</span>
-              <div
-                className="segmented-control"
-                aria-label="Select test duration"
-              >
-                {DURATIONS.map((seconds) => (
-                  <button
-                    className={duration === seconds ? "active" : ""}
-                    disabled={status === "running"}
-                    key={seconds}
-                    onClick={() => chooseDuration(seconds)}
-                    type="button"
-                  >
-                    {seconds}s
-                  </button>
-                ))}
+            <div className="control-cluster">
+              <div className="duration-control">
+                <span className="control-label">Duration</span>
+                <div
+                  className="segmented-control"
+                  aria-label="Select test duration"
+                >
+                  {DURATIONS.map((seconds) => (
+                    <button
+                      className={duration === seconds ? "active" : ""}
+                      disabled={status === "running" || isGenerating}
+                      key={seconds}
+                      onClick={() => chooseDuration(seconds)}
+                      type="button"
+                    >
+                      {seconds}s
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              <label className="topic-control">
+                <span className="control-label">Topic</span>
+                <select
+                  aria-label="Select passage topic"
+                  disabled={status === "running" || isGenerating}
+                  onChange={(event) => chooseTopic(event.target.value as Topic)}
+                  value={topic}
+                >
+                  {TOPICS.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
 
             <div className="tool-actions">
+              <span className="ai-control-label">
+                <Sparkles size={14} aria-hidden="true" />
+                AI passage
+              </span>
               <button
                 className="icon-button"
-                onClick={loadNewText}
-                title="Load new passage"
+                disabled={isGenerating}
+                onClick={() => void loadNewText()}
+                title="Generate new passage"
                 type="button"
               >
-                <Shuffle size={17} aria-hidden="true" />
-                <span className="sr-only">Load new passage</span>
+                {isGenerating ? (
+                  <LoaderCircle
+                    className="spin"
+                    size={17}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Shuffle size={17} aria-hidden="true" />
+                )}
+                <span className="sr-only">Generate new passage</span>
               </button>
               <button
                 className="icon-button"
+                disabled={isGenerating}
                 onClick={() => resetTest()}
-                title="Restart test"
+                title="Restart current passage"
                 type="button"
               >
                 <RotateCcw size={17} aria-hidden="true" />
-                <span className="sr-only">Restart test</span>
+                <span className="sr-only">Restart current passage</span>
               </button>
             </div>
           </div>
@@ -414,18 +541,28 @@ export default function Home() {
           <div className="passage-meta">
             <div>
               <span>
-                Passage {String(passageIndex + 1).padStart(2, "0")}
+                Passage {String(Math.max(1, passageNumber)).padStart(2, "0")}
               </span>
               <strong>{passage.category}</strong>
             </div>
-            <span className={`status-indicator ${status}`}>
-              <i aria-hidden="true" />
-              {statusLabel}
-            </span>
+            <div className="passage-status">
+              <span className={`source-indicator ${passageSource}`}>
+                <Sparkles size={13} aria-hidden="true" />
+                {passageSource === "ai" ? "AI generated" : "Fresh passage"}
+              </span>
+              <span
+                className={`status-indicator ${isGenerating ? "generating" : status}`}
+              >
+                <i aria-hidden="true" />
+                {statusLabel}
+              </span>
+            </div>
           </div>
 
           <div
-            className={`typing-surface ${status === "finished" ? "is-finished" : ""}`}
+            className={`typing-surface ${
+              status === "finished" ? "is-finished" : ""
+            } ${isGenerating ? "is-loading" : ""}`}
             onClick={focusInput}
             role="presentation"
           >
@@ -440,7 +577,7 @@ export default function Home() {
               autoComplete="off"
               autoCorrect="off"
               spellCheck={false}
-              disabled={status === "finished"}
+              disabled={status === "finished" || isGenerating}
             />
 
             <div className="passage" aria-hidden="true">
@@ -472,7 +609,12 @@ export default function Home() {
               ))}
             </div>
 
-            {status === "idle" && (
+            {isGenerating ? (
+              <div className="generating-passage" aria-live="polite">
+                <LoaderCircle className="spin" size={18} aria-hidden="true" />
+                Creating a fresh passage
+              </div>
+            ) : status === "idle" ? (
               <button
                 className="start-button"
                 onClick={focusInput}
@@ -481,7 +623,7 @@ export default function Home() {
                 <Keyboard size={16} aria-hidden="true" />
                 Start typing
               </button>
-            )}
+            ) : null}
           </div>
 
           {status === "finished" && completedResult ? (
@@ -515,11 +657,20 @@ export default function Home() {
               </div>
               <button
                 className="primary-button"
-                onClick={() => resetTest()}
+                disabled={isGenerating}
+                onClick={() => void loadNewText()}
                 type="button"
               >
-                <RefreshCw size={16} aria-hidden="true" />
-                Try again
+                {isGenerating ? (
+                  <LoaderCircle
+                    className="spin"
+                    size={16}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Sparkles size={16} aria-hidden="true" />
+                )}
+                New passage
               </button>
             </div>
           ) : (
