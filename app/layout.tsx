@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Typeflow — Typing Speed Test",
+  title: "Typeflow | Professional Typing Speed Test",
   description:
-    "Measure your typing speed, accuracy, and consistency with a clean, distraction-free typing test.",
+    "Measure typing speed, accuracy, and progress with a focused professional typing test.",
   other: {
     "codex-preview": "development",
   },
